@@ -1,7 +1,9 @@
 # Fishing (CYD Games)
 
 Touchscreen games for the CYD family of ESP32 boards: a **fishing game** and a **rainbow tic-tac-toe**, with a spinning
-rainbow-spiral splash and celebrations. Code by Grey and my buddy Claude AI.
+rainbow-spiral splash and celebrations.
+
+**Built by James with his new buddy Claude.**
 
 ## Games
 - **Fishing.** Tap the water: the boat sails there and drops the hook to that depth. When a fish bites, **hold** to reel
