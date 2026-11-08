@@ -24,4 +24,4 @@ echo "- $FIRST"
 if [ -n "$(printf '%s' "$REST" | tr -d '[:space:]')" ]; then
   printf '%s\n' "$REST"
 fi
-echo "- Factory and app files for all three builds are attached."
+echo "- Factory and app files for all five builds are attached."

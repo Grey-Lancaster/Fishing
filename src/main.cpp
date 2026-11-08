@@ -1,5 +1,6 @@
 // Code by Grey and my buddy Claude AI
-// CYD games (2.8" and 4"): menu with rainbow tic-tac-toe and a fishing game; rainbow spiral splash/celebrations.
+// CYD / Freenove games (2.8" and 4"): menu with rainbow tic-tac-toe and a fishing game; rainbow spiral splash.
+// Boards: cyd40, cyd28, cyd28usb2 (classic ESP32, resistive touch); freenove4, freenove28 (ESP32-S3, capacitive).
 // Pin map (ESP32-2432S028):
 //   Display (HSPI)  MISO 12, MOSI 13, SCLK 14, CS 15, DC 2, BL 21   -> set in platformio.ini for TFT_eSPI
 //   Touch XPT2046   IRQ 36, MOSI 32, MISO 39, CLK 25, CS 33         -> own pins, bit-banged (as in Fish Tank)
@@ -26,7 +27,29 @@
 
 TFT_eSPI tft;
 
-#ifdef BOARD_CYD40
+#if defined(BOARD_FREENOVE_S3)
+// ---------------------------------------------------------------- Freenove FNK0104S 4.0" / FNK0104B 2.8" (ESP32-S3):
+// FT6336U capacitive touch on I2C (SDA 16, SCL 15, RST 18, INT 17). Speaker amp enable GPIO1 (LOW = on), held off.
+// Pins and touch orientation from CYD-and-Freenove-Fish-Tank hal_freenove.cpp.
+#include <Wire.h>
+#include "FT6336U.h"
+#define HAS_LED_LDR 0
+#define AMP_EN 1
+static FT6336U ft6336u(16, 15, 18, 17);
+static void xptBegin() {
+  pinMode(AMP_EN, OUTPUT);
+  digitalWrite(AMP_EN, HIGH);
+  ft6336u.begin();
+}
+// "Raw" = the controller's own coordinates (portrait); calibration maps them like the resistive boards.
+static bool xptRead(uint16_t &xr, uint16_t &yr) {
+  FT6336U_TouchPointType tp = ft6336u.scan();
+  if (tp.touch_count == 0) return false;
+  xr = tp.tp[0].x;
+  yr = tp.tp[0].y;
+  return true;
+}
+#elif defined(BOARD_CYD40)
 // ---------------------------------------------------------------- 4" board: XPT2046 shares the display SPI bus
 // (CLK 14, MOSI 13, MISO 12, CS 33), so TFT_eSPI drives it via TOUCH_CS. RGB LED / LDR pins unknown on this board.
 #define HAS_LED_LDR 0
@@ -1028,7 +1051,12 @@ void setup() {
   if (!loadCal()) {
     // No saved calibration: rough default (4" panel reads X mirrored). The Calibrate button does it properly.
     const int W = tft.width(), H = tft.height();
-#ifdef BOARD_CYD40
+#if defined(BOARD_FREENOVE_S3)
+    // Capacitive, rotation 1: screen x = raw y, screen y = height - raw x (as Fish Tank's hal_freenove.cpp).
+    cal.swap = 1;
+    cal.cxk = 1;  cal.cx0 = 0;
+    cal.cyk = -1; cal.cy0 = H;
+#elif defined(BOARD_CYD40)
     // 4" panel: raw touch axes are the panel's native portrait ones, so in landscape they are swapped and both
     // run backwards (screen x from raw y, screen y from raw x; raw ~300..3800). Worked out from real taps.
     cal.swap = 1;

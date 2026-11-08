@@ -1,5 +1,5 @@
 # Code by Grey and my buddy Claude AI
-# Adapted from Grey-Lancaster/CYD-and-Freenove-Fish-Tank. Every push builds all three boards; pushing an annotated
+# Adapted from Grey-Lancaster/CYD-and-Freenove-Fish-Tank. Every push builds all five boards; pushing an annotated
 # tag vX.Y.Z also publishes a GitHub Release "Fishing vX.Y.Z" with a factory image per board (tag message = "What's new").
 name: Build
 
@@ -19,11 +19,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # classic ESP32 boards: the bootloader goes at 0x1000 in the merged image
+        # chip and where the bootloader goes in the merged image (S3: 0x0, classic ESP32: 0x1000)
         include:
-          - {env: cyd40,     chip: esp32, boot: "0x1000"}
-          - {env: cyd28,     chip: esp32, boot: "0x1000"}
-          - {env: cyd28usb2, chip: esp32, boot: "0x1000"}
+          - {env: freenove4,  chip: esp32s3, boot: "0x0"}
+          - {env: freenove28, chip: esp32s3, boot: "0x0"}
+          - {env: cyd40,      chip: esp32,   boot: "0x1000"}
+          - {env: cyd28,      chip: esp32,   boot: "0x1000"}
+          - {env: cyd28usb2,  chip: esp32,   boot: "0x1000"}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -43,7 +45,8 @@ jobs:
           B=.pio/build/${{ matrix.env }}
           mkdir -p dist
           BOOT=$(find ~/.platformio/packages/framework-arduinoespressif32 -name boot_app0.bin | head -1)
-          # factory = the complete image, flashed at offset 0 (wipes the board, including the saved best score)
+          # factory = the complete image, flashed at offset 0 (wipes the board, including the saved best score).
+          # DIO: the Freenove N16R8's octal PSRAM needs it.
           esptool.py --chip ${{ matrix.chip }} merge_bin \
             -o dist/Fishing-${{ matrix.env }}-factory.bin \
             --flash_mode dio --flash_freq keep --flash_size keep \
