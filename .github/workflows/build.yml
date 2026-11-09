@@ -83,6 +83,8 @@ jobs:
           path: dist
           merge-multiple: true
       - run: ls -l dist
+      # checkout leaves the pushed tag as a lightweight ref; fetch the annotated tag object so its message is readable
+      - run: git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
       - name: Write the release notes
         run: bash .github/release_notes.sh "$GITHUB_REF_NAME" > release_notes.md
       - uses: softprops/action-gh-release@v2
