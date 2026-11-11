@@ -23,4 +23,9 @@ Colours wrong on a CYD? You most likely picked the wrong CYD build; try the othe
 | `Fishing-<build>-factory.bin` | `0x0` | **wiped** |
 | `Fishing-<build>-app.bin` | `0x10000` | **kept** |
 
+## Update over WiFi (no cable)
+Once the board is on WiFi (tap **WiFi** on the menu and pick your network), open `http://games-<build>.local` in a
+browser, tap **Open update page** and choose `Fishing-<build>-app.bin`. The best score, touch calibration and WiFi are
+kept. A board still running v0.2.0 or older needs one USB flash first.
+
 Touch off? Hold the **BOOT** button for 2 seconds to calibrate. A short press of BOOT always returns to the menu.
