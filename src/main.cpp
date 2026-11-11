@@ -13,6 +13,13 @@
 #include <Arduino.h>
 #include <TFT_eSPI.h>
 #include <Preferences.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <ESPmDNS.h>
+#include <ArduinoOTA.h>
+#include <ElegantOTA.h>
+#include <lvgl.h>
+#include <TouchWifiProvisioner.h>
 
 #define XPT2046_IRQ 36
 #define XPT2046_MOSI 32
@@ -234,7 +241,10 @@ static void led(bool r, bool g, bool b) {
 static const int SPIRAL_ARMS = 3;
 static const float SPIRAL_TWIST = 2.2f;  // phase steps per pixel of radius
 static const int STRIP_ROWS = 16;
-static uint8_t **spiralPhase = nullptr;  // one malloc per row: the ESP32 heap has no single 150 KB block
+// Only the top half is stored: the spiral is symmetric about the centre, so pixel (W-1-x, H-1-y) has the same
+// radius and an angle half a turn on, i.e. phase + 128. That halves the table (75 KB on the 4" panel), which
+// leaves the classic ESP32 boards enough heap to start WiFi.
+static uint8_t **spiralPhase = nullptr;  // one malloc per row: the ESP32 heap has no single large block
 static uint16_t *stripBuf = nullptr;
 
 static uint16_t hsv565(float h, float s, float v) {  // h 0..1
@@ -257,13 +267,14 @@ static uint16_t hsv565(float h, float s, float v) {  // h 0..1
 static bool spiralBegin() {
   const int W = tft.width(), H = tft.height();
   stripBuf = (uint16_t *)malloc(W * STRIP_ROWS * sizeof(uint16_t));
-  spiralPhase = (uint8_t **)calloc(H, sizeof(uint8_t *));
+  const int HS = (H + 1) / 2;  // stored rows
+  spiralPhase = (uint8_t **)calloc(HS, sizeof(uint8_t *));
   if (!stripBuf || !spiralPhase) {
     Serial.println("spiral: out of memory");
     return false;
   }
-  const float cx = W / 2.0f, cy = H / 2.0f;
-  for (int y = 0; y < H; y++) {
+  const float cx = (W - 1) / 2.0f, cy = (H - 1) / 2.0f;  // exact centre, so the mirrored half lines up
+  for (int y = 0; y < HS; y++) {
     spiralPhase[y] = (uint8_t *)malloc(W);
     if (!spiralPhase[y]) {
       Serial.printf("spiral: out of memory at row %d\n", y);
@@ -297,8 +308,15 @@ static void spiralFrame() {
     const int rows = min(STRIP_ROWS, H - y0);
     uint16_t *dst = stripBuf;
     for (int r = 0; r < rows; r++) {
-      const uint8_t *src = spiralPhase[y0 + r];
-      for (int x = 0; x < W; x++) *dst++ = pal[uint8_t(src[x] - shift)];
+      const int y = y0 + r;
+      if (y < (H + 1) / 2) {
+        const uint8_t *src = spiralPhase[y];
+        for (int x = 0; x < W; x++) *dst++ = pal[uint8_t(src[x] - shift)];
+      } else {  // bottom half: the top half rotated 180 degrees, half a turn on in phase
+        const uint8_t *src = spiralPhase[H - 1 - y] + W - 1;
+        const uint8_t s = uint8_t(shift - 128);
+        for (int x = 0; x < W; x++) *dst++ = pal[uint8_t(*src-- - s)];
+      }
     }
     tft.pushImage(0, y0, W, rows, stripBuf);
   }
@@ -996,9 +1014,180 @@ static void fishRender() {
   oy = 0;
 }
 
-// ---------------------------------------------------------------- menu
-enum AppMode { M_MENU, M_TTT, M_FISH };
+enum AppMode { M_MENU, M_TTT, M_FISH, M_WIFI };
 static AppMode mode = M_MENU;
+
+// ---------------------------------------------------------------- WiFi + OTA updates
+// Same stack as Fish Tank: TouchWifiProvisioner (LVGL picker + keyboard) for the network, then ArduinoOTA (upload
+// from PlatformIO, envs *-ota) and an ElegantOTA page at http://<host>.local/update (pick the -app.bin). LVGL only
+// draws while the WiFi screen is open; the games keep drawing with TFT_eSPI. With no saved network nothing starts
+// until the WiFi button is tapped, so the games work offline exactly as before.
+#if defined(BOARD_FREENOVE4)
+#define DEFAULT_HOST "games-freenove4"
+#elif defined(BOARD_FREENOVE28)
+#define DEFAULT_HOST "games-freenove28"
+#elif defined(BOARD_CYD40)
+#define DEFAULT_HOST "games-cyd40"
+#elif defined(ST7789_DRIVER)
+#define DEFAULT_HOST "games-cyd28usb2"
+#else
+#define DEFAULT_HOST "games-cyd28"
+#endif
+
+static WebServer server(80);
+static bool netStarted = false;  // TouchWifiProvisioner::begin() called
+static bool online = false;      // services running (they stay registered across WiFi drops)
+static volatile bool wifiDone = false;  // picker finished (joined or cancelled): leave the WiFi screen
+
+static lv_disp_draw_buf_t lvDrawBuf;
+static lv_color_t lvBuf[480 * 10];
+
+static void lvFlush(lv_disp_drv_t *disp, const lv_area_t *a, lv_color_t *px) {
+  const uint32_t w = a->x2 - a->x1 + 1, h = a->y2 - a->y1 + 1;
+  tft.startWrite();
+  tft.setAddrWindow(a->x1, a->y1, w, h);
+  tft.pushColors((uint16_t *)&px->full, w * h, true);
+  tft.endWrite();
+  lv_disp_flush_ready(disp);
+}
+
+static void lvTouch(lv_indev_drv_t *, lv_indev_data_t *data) {
+  int x, y;
+  uint16_t xr, yr;
+  if (touchPoint(x, y, xr, yr)) {
+    data->state = LV_INDEV_STATE_PR;
+    data->point.x = x;
+    data->point.y = y;
+  } else {
+    data->state = LV_INDEV_STATE_REL;
+  }
+}
+
+static void otaProgress(size_t cur, size_t total) {
+  static uint32_t lastDraw = 0;
+  if (!total || (millis() - lastDraw < 150 && cur < total)) return;  // each repaint costs SPI time
+  lastDraw = millis();
+  const int W = tft.width();
+  tft.fillRect(10, 60, W - 20, 20, TFT_DARKGREY);
+  tft.fillRect(10, 60, (int)((W - 20) * (float)cur / total), 20, TFT_GREEN);
+}
+
+// An upload needs more heap than the classic ESP32 has left while idle (its receive buffers ran it out at ~17% on
+// the cyd40), so hand back the spiral table and the fishing sprite first. The board restarts after every update,
+// and after a failed one too, so the games never run without them.
+static void otaStart() {
+  if (spiralPhase) {
+    for (int y = 0; y < (tft.height() + 1) / 2; y++) free(spiralPhase[y]);
+    free(spiralPhase);
+    spiralPhase = nullptr;
+  }
+  free(stripBuf);
+  stripBuf = nullptr;
+  spr.deleteSprite();
+  Serial.printf("OTA start, free heap %u\n", ESP.getFreeHeap());
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString("Updating... don't unplug!", 10, 10, 4);
+}
+
+static void menuHint();
+
+static void startServices() {
+  if (online) return;
+  online = true;
+  WiFi.setAutoReconnect(true);
+  ArduinoOTA.setHostname(DEFAULT_HOST);
+  ArduinoOTA.onStart(otaStart);
+  ArduinoOTA.onProgress([](unsigned int p, unsigned int t) { otaProgress(p, t); });
+  ArduinoOTA.onError([](ota_error_t e) {
+    Serial.printf("OTA failed (%u), restarting\n", e);
+    delay(500);
+    ESP.restart();
+  });
+  ArduinoOTA.begin();
+  MDNS.begin(DEFAULT_HOST);
+  MDNS.addService("http", "tcp", 80);
+  server.on("/", HTTP_GET, []() {
+    String s = F("<!doctype html><meta name=viewport content='width=device-width'><title>CYD Games</title>"
+                 "<body style='font-family:sans-serif;margin:2em'><h2>CYD Games</h2><p>Board: <b>" DEFAULT_HOST
+                 "</b><br>Built " __DATE__ " " __TIME__ "</p><p>To update, open the update page and choose "
+                 "<b>Fishing-");
+    s += String(DEFAULT_HOST).substring(6);
+    s += F("-app.bin</b> (not the factory file). Your best score and touch calibration are kept.</p>"
+           "<p><a href='/update'><button>Open update page</button></a></p>");
+    server.send(200, "text/html", s);
+  });
+  ElegantOTA.begin(&server);
+  ElegantOTA.onStart(otaStart);
+  ElegantOTA.onProgress(otaProgress);
+  ElegantOTA.onEnd([](bool ok) {  // success reboots by itself
+    if (!ok) {
+      Serial.println("Web update failed, restarting");
+      delay(500);
+      ESP.restart();
+    }
+  });
+  server.begin();
+  Serial.printf("WiFi up: http://%s.local  %s  free heap %u\n", DEFAULT_HOST, WiFi.localIP().toString().c_str(),
+                ESP.getFreeHeap());
+}
+
+static void netBegin() {
+  if (netStarted) return;
+  netStarted = true;
+  lv_init();
+  lv_disp_draw_buf_init(&lvDrawBuf, lvBuf, nullptr, sizeof(lvBuf) / sizeof(lvBuf[0]));
+  static lv_disp_drv_t dispDrv;
+  lv_disp_drv_init(&dispDrv);
+  dispDrv.hor_res = tft.width();
+  dispDrv.ver_res = tft.height();
+  dispDrv.flush_cb = lvFlush;
+  dispDrv.draw_buf = &lvDrawBuf;
+  lv_disp_drv_register(&dispDrv);
+  static lv_indev_drv_t indevDrv;
+  lv_indev_drv_init(&indevDrv);
+  indevDrv.type = LV_INDEV_TYPE_POINTER;
+  indevDrv.read_cb = lvTouch;
+  lv_indev_drv_register(&indevDrv);
+  lv_obj_set_style_bg_color(lv_scr_act(), lv_color_black(), 0);
+  TouchWifiProvisioner::begin(lv_scr_act(), DEFAULT_HOST, [](const String &) {
+    startServices();
+    wifiDone = true;
+    if (mode == M_MENU) menuHint();
+  });
+}
+
+// WiFi button: picker over the screen (Cancel row, or BOOT, goes back to the menu).
+static void wifiOpen() {
+  mode = M_WIFI;
+  wifiDone = false;
+  if (!netStarted) {
+    netBegin();  // no saved network yet: begin() shows the picker itself
+  } else {
+    TouchWifiProvisioner::openPicker([]() { wifiDone = true; });
+  }
+  lv_obj_invalidate(lv_scr_act());
+}
+
+static void netLoop() {
+  if (!netStarted) return;
+  TouchWifiProvisioner::loop();
+  if (mode == M_WIFI) lv_timer_handler();
+  if (online) {
+    ArduinoOTA.handle();
+    server.handleClient();
+    ElegantOTA.loop();
+  }
+}
+
+// ---------------------------------------------------------------- menu
+static void wifiRect(int &x, int &y, int &w, int &h) {
+  const bool big = tft.width() >= 480;
+  w = big ? 90 : 64;
+  h = big ? 36 : 28;
+  x = tft.width() - w - 6;
+  y = 6;
+}
 
 static void menuRect(int i, int &x, int &y, int &w, int &h) {
   w = tft.width() * 0.66f;
@@ -1025,9 +1214,27 @@ static void menuDraw(bool full) {
     tft.drawCentreString(labels[i], W / 2, y + (h - tft.fontHeight(4)) / 2, 4);
   }
   if (full) {
-    tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
-    tft.drawCentreString("BOOT button: menu    Hold BOOT 2 s: calibrate touch", W / 2, tft.height() - 18, big ? 2 : 1);
+    int x, y, w, h;
+    wifiRect(x, y, w, h);
+    tft.drawRoundRect(x, y, w, h, 8, TFT_SKYBLUE);
+    tft.setTextColor(TFT_SKYBLUE, TFT_BLACK);
+    tft.drawCentreString("WiFi", x + w / 2, y + (h - tft.fontHeight(2)) / 2, 2);
+    menuHint();
   }
+}
+
+// Bottom line: the controls, or where to find the update page once online.
+static void menuHint() {
+  const int W = tft.width(), H = tft.height();
+  const int font = W >= 480 ? 2 : 1;
+  tft.fillRect(0, H - 20, W, 20, TFT_BLACK);
+  char line[96];
+  if (WiFi.status() == WL_CONNECTED)
+    snprintf(line, sizeof(line), "Updates: http://%s.local  (%s)", DEFAULT_HOST, WiFi.localIP().toString().c_str());
+  else
+    snprintf(line, sizeof(line), "BOOT button: menu    Hold BOOT 2 s: calibrate touch");
+  tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  tft.drawCentreString(line, W / 2, H - 18, font);
 }
 
 static void goMenu() {
@@ -1077,6 +1284,7 @@ void setup() {
   celebrate(2000);  // spiral splash
   goMenu();
   Serial.printf("CYD games up, free heap %u\n", ESP.getFreeHeap());
+  if (!TouchWifiProvisioner::savedNetworks().empty()) netBegin();  // rejoin in the background
 }
 
 void loop() {
@@ -1084,6 +1292,17 @@ void loop() {
   static bool wasDown = false;
   int x = 0, y = 0;
   uint16_t xr, yr;
+
+  netLoop();
+  if (mode == M_WIFI) {
+    if (wifiDone) goMenu();
+    else if (digitalRead(0) == LOW) {  // BOOT backs out of the picker
+      while (digitalRead(0) == LOW) delay(10);
+      goMenu();
+    }
+    delay(5);
+    return;
+  }
 
   const bool down = touchPoint(x, y, xr, yr);
   const bool tap = down && !wasDown;
@@ -1115,6 +1334,12 @@ void loop() {
   switch (mode) {
     case M_MENU:
       if (tap) {
+        int wx, wy, ww, wh;
+        wifiRect(wx, wy, ww, wh);
+        if (x >= wx - 8 && y < wy + wh + 8) {
+          wifiOpen();
+          break;
+        }
         for (int i = 0; i < 2; i++) {
           int bx, by, bw, bh;
           menuRect(i, bx, by, bw, bh);

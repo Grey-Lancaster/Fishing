@@ -12,6 +12,17 @@ spinning rainbow-spiral splash and celebrations.
 - **Tic Tac Toe.** You are X against a beatable CPU, or play 2 players. The grid and marks cycle through the rainbow.
 - **BOOT button:** short press = back to the menu; hold 2 s = 4-corner touch calibration (saved).
 
+## WiFi and updates (OTA)
+Tap **WiFi** (top right of the menu) and pick your network on the screen; the board remembers it and rejoins on every
+start. Without WiFi the games work exactly as before. Once it is online the bottom of the menu shows its address,
+`http://games-<env>.local` (for example `games-cyd40.local`), and there are two ways to update without a USB cable:
+- **Browser:** open that address, then **Open update page**, and choose `Fishing-<env>-app.bin` from the release (or
+  `.pio/build/<env>/firmware.bin`). Not the factory file.
+- **PlatformIO:** `pio run -e cyd40-ota -t upload` (each board has an `<env>-ota` env).
+
+Both keep the best score, touch calibration and WiFi. The WiFi picker is
+[TouchWifiProvisioner](https://github.com/Grey-Lancaster/TouchWifiProvisioner), the same one Fish Tank uses.
+
 ## Boards (PlatformIO envs)
 | Env | Board |
 | --- | --- |
