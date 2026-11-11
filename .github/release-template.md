@@ -26,6 +26,9 @@ Colours wrong on a CYD? You most likely picked the wrong CYD build; try the othe
 ## Update over WiFi (no cable)
 Once the board is on WiFi (tap **WiFi** on the menu and pick your network), open `http://games-<build>.local` in a
 browser, tap **Open update page** and choose `Fishing-<build>-app.bin`. The best score, touch calibration and WiFi are
-kept. A board still running v0.2.0 or older needs one USB flash first.
+kept. A board still running v0.3.0 or older needs one USB flash of the factory file first.
+
+CYD boards use the same flash layout as Deer Hunt and Show-Jumping, so after that one USB flash you can switch between
+these games, Deer Hunt, Show-Jumping and Fish Tank over WiFi by uploading the other project's update file.
 
 Touch off? Hold the **BOOT** button for 2 seconds to calibrate. A short press of BOOT always returns to the menu.

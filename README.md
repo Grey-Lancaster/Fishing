@@ -20,7 +20,14 @@ start. Without WiFi the games work exactly as before. Once it is online the bott
   `.pio/build/<env>/firmware.bin`). Not the factory file.
 - **PlatformIO:** `pio run -e cyd40-ota -t upload` (each board has an `<env>-ota` env).
 
-Both keep the best score, touch calibration and WiFi. The WiFi picker is
+Both keep the best score, touch calibration and WiFi.
+
+**Switching projects over WiFi.** The CYD builds use `boards/partitions_cyd.csv`, the same flash layout as Deer Hunt and
+Show-Jumping (two 1.75 MB app slots plus Deer Hunt's scenery cache); the Freenove S3 builds use `default_16MB.csv` like
+every other project. Once a board has that layout (one USB flash of a factory file from any of those projects), you can
+swap between these games, Deer Hunt, Show-Jumping and Fish Tank by uploading the other project's update file over
+WiFi; the saved WiFi network is shared too. Tested on the cyd40: games → Deer Hunt v2.0.7 → games. CYD-PhotoFrame
+needs a SPIFFS area this layout doesn't have, so flash it by USB instead. The WiFi picker is
 [TouchWifiProvisioner](https://github.com/Grey-Lancaster/TouchWifiProvisioner), the same one Fish Tank uses.
 
 ## Boards (PlatformIO envs)
